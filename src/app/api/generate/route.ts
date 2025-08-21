@@ -6,50 +6,79 @@ if (!process.env.GEMINI_API_KEY) {
 }
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+const isValidRecommendation = (item: any): boolean => {
+    return (
+        typeof item.nama_tempat === 'string' &&
+        typeof item.deskripsi === 'string' &&
+        typeof item.lokasi === 'string'
+    );
+};
 
 export async function POST(req: NextRequest) {
     try {
-        const { prompt, location } = await req.json();
+        const { prompt, location, image } = await req.json();
 
-        if (!prompt) {
-            return NextResponse.json(
-                { error: "Prompt is required" },
-                { status: 400 }
-            );
+        if (!prompt && !image) {
+            return NextResponse.json({ error: "Harus ada prompt atau image" }, { status: 400 });
         }
 
-        const fullPrompt = `
-        Anda adalah seorang ahli travel yang sangat membantu.
-        Berikan saya 3 rekomendasi tempat liburan di ${location || 'Indonesia'} berdasarkan deskripsi berikut: "${prompt}".
+        let fullPrompt = `
+        Anda adalah seorang pakar perjalanan yang sangat detail.
+        Berikan saya 3 rekomendasi tempat liburan yang sesuai dengan deskripsi dan/atau gambar yang diberikan.
+        Lokasi prioritas adalah ${location || "Indonesia"}.
+        
+        Aturan:
+        1. Jika deskripsi atau gambar tidak relevan (misalnya 'lorem ipsum', teks acak, atau gambar yang tidak berhubungan dengan travel), kembalikan pesan error dalam format JSON berisi objek dengan properti { "error": "Pesan error di sini" }.
+        2. Penting: Jika lokasi diberikan dan lokasi tidak ditemukan di google maps atau lokasi adalah lokasi fiksi tau fiktif, maka kembalikan pesan error dalam format JSON berisi objek dengan properti {"error": "Lokasi yang anda maksud tidak ditemukan"}.
+        3. Analisis deskripsi untuk memahami suasana, jenis pemandangan, dan aktivitas yang diinginkan.
+        4. Analisis gambar jika diberikan, untuk mendapatkan petunjuk visual, jika gambar yang diberikan tidak sesuai dengan suasana liburan maka tampilkan pesan error dalam format JSON berisi objek dengan properti {"error": "Gambar yang anda maksukkan tidak sesuai dengan konsep wisata"}.
 
-        Berikan jawaban HANYA dalam format JSON yang valid.
-        Struktur JSON harus berupa array dari objek, di mana setiap objek memiliki properti berikut:
+        ${prompt ? `Deskripsi: "${prompt}"` : ""}
+        ${image ? `Gambar juga diberikan untuk dianalisis.` : ""}
+        
+        Berikan jawaban HANYA dalam format JSON array berisi objek dengan properti:
         - "nama_tempat": string
-        - "deskripsi": string (deskripsi singkat dan menarik, maksimal 30 kata)
-        - "lokasi": string (contoh: "Kabupaten Badung, Bali")
+        - "deskripsi": string (maks 30 kata)
+        - "lokasi": string
+        `;
 
-        Contoh output JSON:
-        [
-            {
-            "nama_tempat": "Pantai Kelingking",
-            "deskripsi": "Sebuah pantai ikonik dengan tebing berbentuk T-Rex dan pemandangan laut biru yang menakjubkan. Populer untuk foto-foto Instagramable.",
-            "lokasi": "Nusa Penida, Bali"
-            }
-        ]
-    `;
+        let result;
+        if (image) {
+            const base64Data = image.split(",")[1];
+            const mimeType = image.match(/data:(.*?);base64/)?.[1] || "image/png";
 
-        const result = await model.generateContent(fullPrompt);
+            result = await model.generateContent([
+                { text: fullPrompt },
+                {
+                    inlineData: {
+                        data: base64Data,
+                        mimeType,
+                    },
+                },
+            ]);
+        } else {
+            result = await model.generateContent(fullPrompt);
+        }
+
+
         const responseText = result.response.text();
+        try {
+            const jsonString = responseText.replace(/```json|```/g, "").trim();
+            const parsedData = JSON.parse(jsonString);
 
-        const jsonString = responseText.replace(/```json/g, "").replace(/```/g, "").trim();
-
-        const recommendations = JSON.parse(jsonString);
-
-        return NextResponse.json({ recommendations });
+            if (Array.isArray(parsedData) && parsedData.every(isValidRecommendation)) {
+                return NextResponse.json({ recommendations: parsedData });
+            } else {
+                return NextResponse.json({ fallback: `${jsonString}` });
+            }
+        } catch (error) {
+            return NextResponse.json({ fallback: responseText });
+        }
 
     } catch (error) {
-        console.error(error);
+        console.error("Gemini API Error:", error);
         return NextResponse.json(
             { error: "Gagal berkomunikasi dengan Gemini AI" },
             { status: 500 }
